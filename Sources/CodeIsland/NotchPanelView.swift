@@ -1406,6 +1406,9 @@ private struct SessionCard: View {
                     Spacer(minLength: 8)
 
                 HStack(spacing: 4) {
+                        if session.isRemote {
+                            SessionTag("REMOTE", color: Color(red: 0.32, green: 0.62, blue: 1.0))
+                        }
                         if session.interrupted {
                             SessionTag("INT", color: Color(red: 1.0, green: 0.6, blue: 0.2))
                         }

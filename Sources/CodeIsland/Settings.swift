@@ -61,6 +61,9 @@ enum SettingsKey {
     // Tool status display
     static let showToolStatus = "showToolStatus"              // true = detailed, false = simple
 
+    // Remote
+    static let remoteLocalPort = "remoteLocalPort"
+
 }
 
 struct SettingsDefaults {
@@ -96,6 +99,7 @@ struct SettingsDefaults {
 
     static let showToolStatus = true
 
+    static let remoteLocalPort = 39091
 }
 
 @MainActor
@@ -131,6 +135,7 @@ class SettingsManager {
             SettingsKey.mascotSpeed: SettingsDefaults.mascotSpeed,
             SettingsKey.sessionGroupingMode: SettingsDefaults.sessionGroupingMode,
             SettingsKey.showToolStatus: SettingsDefaults.showToolStatus,
+            SettingsKey.remoteLocalPort: SettingsDefaults.remoteLocalPort,
         ])
     }
 
@@ -211,6 +216,13 @@ class SettingsManager {
         set { defaults.set(newValue, forKey: SettingsKey.sessionGroupingMode) }
     }
 
+    var remoteLocalPort: Int {
+        get {
+            let port = defaults.integer(forKey: SettingsKey.remoteLocalPort)
+            return port > 0 ? port : SettingsDefaults.remoteLocalPort
+        }
+        set { defaults.set(newValue, forKey: SettingsKey.remoteLocalPort) }
+    }
 }
 
 // MARK: - Shortcut Actions

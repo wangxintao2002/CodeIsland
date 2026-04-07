@@ -8,6 +8,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     var panelController: PanelWindowController?
     private var hookServer: HookServer?
+    private let remoteTunnelManager = RemoteTunnelManager.shared
     private var hookRecoveryTimer: Timer?
     private var lastHookCheck: Date = .distantPast
     private var globalShortcutMonitor: Any?
@@ -37,6 +38,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panelController?.showPanel()
 
         appState.startSessionDiscovery()
+        remoteTunnelManager.startConfiguredTunnels()
 
         // Hooks auto-recovery: periodic + app activation trigger
         hookRecoveryTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
@@ -100,6 +102,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         teardownGlobalShortcut()
         appState.saveSessions()
         hookServer?.stop()
+        remoteTunnelManager.stopAll()
         appState.stopSessionDiscovery()
     }
 

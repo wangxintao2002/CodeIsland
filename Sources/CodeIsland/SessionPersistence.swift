@@ -3,6 +3,9 @@ import CodeIslandCore
 
 struct PersistedSession: Codable {
     let sessionId: String
+    let originId: String?
+    let originDisplayName: String?
+    let remoteHostAlias: String?
     let cwd: String?
     let source: String
     let model: String?
@@ -29,8 +32,12 @@ enum SessionPersistence {
 
     static func save(_ sessions: [String: SessionSnapshot]) {
         let persisted: [PersistedSession] = sessions.map { (id, s) in
+            let key = SessionKey(rawValue: id)
             return PersistedSession(
-                sessionId: id,
+                sessionId: key.sessionId,
+                originId: s.originId,
+                originDisplayName: s.originDisplayName,
+                remoteHostAlias: s.remoteHostAlias,
                 cwd: s.cwd,
                 source: s.source,
                 model: s.model,

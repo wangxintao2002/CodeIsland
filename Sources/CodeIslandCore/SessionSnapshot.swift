@@ -26,6 +26,9 @@ public struct SessionSnapshot {
     public var cwd: String?
     public var model: String?
     public var permissionMode: String?
+    public var originId: String = SessionKey.localOriginId
+    public var originDisplayName: String?
+    public var remoteHostAlias: String?
     public var toolHistory: [ToolHistoryEntry] = []
     public var subagents: [String: SubagentState] = [:]
     public var startTime: Date = Date()
@@ -63,6 +66,20 @@ public struct SessionSnapshot {
 
     public var activeSubagentCount: Int {
         subagents.values.filter { $0.status != .idle }.count
+    }
+
+    public var isRemote: Bool { originId != SessionKey.localOriginId }
+
+    public var remoteProfileId: String? {
+        guard isRemote, originId.hasPrefix("remote:") else { return nil }
+        return String(originId.dropFirst("remote:".count))
+    }
+
+    public var remoteDisplayName: String? {
+        let label = originDisplayName ?? remoteHostAlias
+        guard let label else { return nil }
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     public mutating func addRecentMessage(_ msg: ChatMessage, maxCount: Int = 3) {
@@ -209,6 +226,9 @@ public struct SessionSnapshot {
 
     /// Short terminal/app name for display tag
     public var terminalName: String? {
+        if isRemote {
+            return remoteDisplayName ?? "SSH"
+        }
         // If termBundleId is a known app, show app name (APP mode)
         if let bid = termBundleId, let name = Self.appBundleNames[bid] {
             return name
@@ -263,10 +283,19 @@ public struct SessionSnapshot {
         if let cwd = cwd {
             // Show parent/folder instead of just folder
             let parts = cwd.split(separator: "/")
+            let base: String
             if parts.count >= 2 {
-                return "\(parts[parts.count - 2])/\(parts[parts.count - 1])"
+                base = "\(parts[parts.count - 2])/\(parts[parts.count - 1])"
+            } else {
+                base = cwd
             }
-            return cwd
+            if let remote = remoteDisplayName {
+                return "\(base) @ \(remote)"
+            }
+            return base
+        }
+        if let remote = remoteDisplayName {
+            return model.map { "\($0) @ \(remote)" } ?? remote
         }
         return model
     }
@@ -354,7 +383,7 @@ public func reduceEvent(
     event: HookEvent,
     maxHistory: Int
 ) -> [SideEffect] {
-    let sessionId = event.sessionId ?? "default"
+    let sessionId = event.routingSessionId
     let eventName = EventNormalizer.normalize(event.eventName)
     var effects: [SideEffect] = []
 
@@ -486,6 +515,10 @@ public func reduceEvent(
         effects.append(.stopMonitor(sessionId: sessionId))
         sessions[sessionId] = SessionSnapshot(startTime: Date())
         // Re-apply metadata from this event (common extraction above wrote to the old session)
+        sessions[sessionId]?.originId = event.originId
+        sessions[sessionId]?.originDisplayName = event.originDisplayName
+        sessions[sessionId]?.remoteHostAlias = event.rawJSON["_remote_host_alias"] as? String
+        sessions[sessionId]?.providerSessionId = event.sessionId
         if let cwd = event.rawJSON["cwd"] as? String, !cwd.isEmpty { sessions[sessionId]?.cwd = cwd }
         if let model = event.rawJSON["model"] as? String, !model.isEmpty { sessions[sessionId]?.model = model }
         if let ppid = event.rawJSON["_ppid"] as? Int, ppid > 0 {
@@ -549,6 +582,16 @@ public func reduceEvent(
 // MARK: - Private Helpers
 
 public func extractMetadata(into sessions: inout [String: SessionSnapshot], sessionId: String, event: HookEvent) {
+    sessions[sessionId]?.originId = event.originId
+    if let display = event.originDisplayName {
+        sessions[sessionId]?.originDisplayName = display
+    }
+    if let remoteHostAlias = event.rawJSON["_remote_host_alias"] as? String, !remoteHostAlias.isEmpty {
+        sessions[sessionId]?.remoteHostAlias = remoteHostAlias
+    }
+    if sessions[sessionId]?.providerSessionId == nil, let providerSessionId = event.sessionId, !providerSessionId.isEmpty {
+        sessions[sessionId]?.providerSessionId = providerSessionId
+    }
     if let cwd = event.rawJSON["cwd"] as? String, !cwd.isEmpty {
         sessions[sessionId]?.cwd = cwd
     } else if sessions[sessionId]?.cwd == nil,

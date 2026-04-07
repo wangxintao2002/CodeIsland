@@ -10,6 +10,7 @@ enum SettingsPage: String, Identifiable, Hashable {
     case mascots
     case sound
     case shortcuts
+    case remote
     case hooks
     case about
 
@@ -23,6 +24,7 @@ enum SettingsPage: String, Identifiable, Hashable {
         case .mascots: return "person.2.fill"
         case .sound: return "speaker.wave.2.fill"
         case .shortcuts: return "command.circle.fill"
+        case .remote: return "point.3.connected.trianglepath.dotted"
         case .hooks: return "link.circle.fill"
         case .about: return "info.circle.fill"
         }
@@ -36,6 +38,7 @@ enum SettingsPage: String, Identifiable, Hashable {
         case .mascots: return .pink
         case .sound: return .green
         case .shortcuts: return .indigo
+        case .remote: return .teal
         case .hooks: return .purple
         case .about: return .cyan
         }
@@ -48,7 +51,7 @@ private struct SidebarGroup: Hashable {
 }
 
 private let sidebarGroups: [SidebarGroup] = [
-    SidebarGroup(title: nil, pages: [.general, .behavior, .appearance, .mascots, .sound, .shortcuts]),
+    SidebarGroup(title: nil, pages: [.general, .behavior, .appearance, .mascots, .sound, .shortcuts, .remote]),
     SidebarGroup(title: "CodeIsland", pages: [.hooks, .about]),
 ]
 
@@ -85,6 +88,7 @@ struct SettingsView: View {
                 case .mascots: MascotsPage()
                 case .sound: SoundPage()
                 case .shortcuts: ShortcutsPage()
+                case .remote: RemotePage()
                 case .hooks: HooksPage()
                 case .about: AboutPage()
                 }
@@ -119,6 +123,115 @@ private struct SidebarRow: View {
                     .foregroundStyle(.white)
             }
         }
+    }
+}
+
+private struct RemotePage: View {
+    @ObservedObject private var remoteProfiles = RemoteProfileStore.shared
+    @ObservedObject private var tunnelManager = RemoteTunnelManager.shared
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Remote SSH Profiles")
+                        .font(.system(size: 16, weight: .semibold))
+                    Text("CodeIsland listens on 127.0.0.1:\(SettingsManager.shared.remoteLocalPort). Each remote profile forwards its own remote port back to this local listener.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+
+                Button("Add Profile") {
+                    remoteProfiles.addProfile()
+                }
+
+                ForEach($remoteProfiles.profiles) { $profile in
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text(profile.trimmedDisplayName.isEmpty ? "Remote" : profile.trimmedDisplayName)
+                                .font(.system(size: 13, weight: .semibold))
+                            Spacer()
+                            statusBadge(tunnelManager.status(for: profile.id))
+                            Button("Connect") {
+                                tunnelManager.startTunnel(for: profile)
+                            }
+                            .disabled(!profile.enabled || !profile.isValid)
+                            Button("Reconnect") {
+                                tunnelManager.reconnect(profileId: profile.id)
+                            }
+                            .disabled(!profile.isValid)
+                            Button("Disconnect") {
+                                tunnelManager.stopTunnel(profileId: profile.id)
+                            }
+                            Button("Remove", role: .destructive) {
+                                tunnelManager.stopTunnel(profileId: profile.id)
+                                remoteProfiles.remove(profileId: profile.id)
+                            }
+                        }
+
+                        Toggle("Enabled", isOn: $profile.enabled)
+                        Toggle("Auto Connect", isOn: $profile.autoConnect)
+                        TextField("Display Name", text: $profile.displayName)
+                        TextField("SSH Host Alias", text: $profile.sshHostAlias)
+                        HStack {
+                            Text("Remote Forward Port")
+                            Spacer()
+                            TextField("39092", value: $profile.remoteForwardPort, format: .number)
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 100)
+                        }
+                        TextField("Jump Command Template (optional)", text: $profile.jumpCommandTemplate)
+                            .textFieldStyle(.roundedBorder)
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Tunnel")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text(profile.tunnelCommand(localPort: SettingsManager.shared.remoteLocalPort))
+                                .font(.system(size: 11, design: .monospaced))
+                                .textSelection(.enabled)
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Remote Environment")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text(profile.environmentSnippet(localPort: SettingsManager.shared.remoteLocalPort))
+                                .font(.system(size: 11, design: .monospaced))
+                                .textSelection(.enabled)
+                        }
+
+                        if let error = tunnelManager.status(for: profile.id).lastError, !error.isEmpty {
+                            Text(error)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(.red.opacity(0.85))
+                                .textSelection(.enabled)
+                        }
+                    }
+                    .padding(14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.white.opacity(0.04))
+                    )
+                }
+            }
+            .padding(20)
+        }
+    }
+
+    private func statusBadge(_ status: RemoteTunnelStatus) -> some View {
+        let color: Color
+        switch status.state {
+        case .connected: color = .green
+        case .connecting: color = .orange
+        case .failed: color = .red
+        case .disconnected: color = .secondary
+        }
+        return Text(status.state.rawValue.capitalized)
+            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+            .foregroundStyle(color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(color.opacity(0.12))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 }
 

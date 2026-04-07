@@ -33,7 +33,13 @@ struct TerminalActivator {
         "ai.opencode.desktop": "OpenCode",
     ]
 
+    @MainActor
     static func activate(session: SessionSnapshot, sessionId: String? = nil) {
+        if session.isRemote {
+            SSHJumpActivator.activate(session: session)
+            return
+        }
+
         // Native app by bundle ID (e.g. Codex APP vs Codex CLI)
         if let bundleId = session.termBundleId,
            nativeAppBundles[bundleId] != nil {

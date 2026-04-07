@@ -5,11 +5,22 @@ import { connect } from "net";
 import { getuid } from "process";
 
 const SOCKET = `/tmp/codeisland-${getuid()}.sock`;
+const CODEISLAND_HOST = process.env.CODEISLAND_HOST || "";
+const CODEISLAND_PORT = process.env.CODEISLAND_PORT ? parseInt(process.env.CODEISLAND_PORT, 10) : 0;
+const CODEISLAND_REMOTE_PROFILE = process.env.CODEISLAND_REMOTE_PROFILE || "";
+const CODEISLAND_REMOTE_HOST_ALIAS = process.env.CODEISLAND_REMOTE_HOST_ALIAS || "";
+
+function connectTarget() {
+  if (CODEISLAND_HOST && CODEISLAND_PORT > 0) {
+    return { host: CODEISLAND_HOST, port: CODEISLAND_PORT };
+  }
+  return { path: SOCKET };
+}
 
 function sendToSocket(json) {
   return new Promise((resolve) => {
     try {
-      const sock = connect({ path: SOCKET }, () => {
+      const sock = connect(connectTarget(), () => {
         sock.write(JSON.stringify(json));
         sock.end();
         resolve(true);
@@ -23,7 +34,7 @@ function sendToSocket(json) {
 function sendAndWaitResponse(json, timeoutMs = 300000) {
   return new Promise((resolve) => {
     try {
-      const sock = connect({ path: SOCKET }, () => {
+      const sock = connect(connectTarget(), () => {
         sock.write(JSON.stringify(json));
         sock.end();
       });
@@ -101,8 +112,18 @@ export default async ({ client, serverUrl }) => {
 
   // Base fields for every event
   function base(sessionId, extra) {
-    return { session_id: sessionId, _source: "opencode", _ppid: pid,
+    const payload = { session_id: sessionId, _source: "opencode", _ppid: pid,
       _env: collectEnv(), _tty: detectedTty, _server_port: serverPort, ...extra };
+    if (CODEISLAND_REMOTE_PROFILE) {
+      payload._remote_profile = CODEISLAND_REMOTE_PROFILE;
+      payload._origin = "remote";
+      payload._origin_id = `remote:${CODEISLAND_REMOTE_PROFILE}`;
+    }
+    if (CODEISLAND_REMOTE_HOST_ALIAS) {
+      payload._remote_host_alias = CODEISLAND_REMOTE_HOST_ALIAS;
+      payload._origin_display_name = CODEISLAND_REMOTE_HOST_ALIAS;
+    }
+    return payload;
   }
 
   const sessionCwd = new Map();

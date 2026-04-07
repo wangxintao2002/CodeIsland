@@ -221,6 +221,7 @@ final class AppState {
     /// Prefers the PID captured by the bridge (_ppid), falls back to scanning for Claude processes by CWD.
     private func tryMonitorSession(_ sessionId: String) {
         guard processMonitors[sessionId] == nil else { return }
+        guard sessions[sessionId]?.isRemote != true else { return }
 
         // Primary: use PID from bridge (works for any CLI)
         if let pid = sessions[sessionId]?.cliPid, pid > 0, kill(pid, 0) == 0 {
@@ -265,6 +266,7 @@ final class AppState {
     private func shouldSuppressAppLevel(for sessionId: String) -> Bool {
         guard UserDefaults.standard.bool(forKey: SettingsKey.smartSuppress) else { return false }
         guard let session = sessions[sessionId],
+              !session.isRemote,
               (session.termApp != nil || session.termBundleId != nil) else { return false }
         return TerminalVisibilityDetector.isTerminalFrontmostForSession(session)
     }
@@ -372,6 +374,7 @@ final class AppState {
 
     private func refreshProviderTitle(for trackedSessionId: String, providerSessionId: String? = nil) {
         guard let session = sessions[trackedSessionId] else { return }
+        guard !session.isRemote else { return }
 
         let lookupSessionId = providerSessionId ?? session.providerSessionId ?? trackedSessionId
         if let providerSessionId {
@@ -398,7 +401,7 @@ final class AppState {
             return
         }
 
-        let sessionId = event.sessionId ?? "default"
+        let sessionId = event.routingSessionId
 
         // Skip Codex APP internal sessions (title generation, etc.) — they have no transcript
         if (event.rawJSON["_source"] as? String) == "codex"
@@ -418,6 +421,7 @@ final class AppState {
 
         // Model transcript read: done AFTER reduceEvent so extractMetadata has filled in cwd
         if sessions[sessionId]?.model == nil
+            && sessions[sessionId]?.isRemote != true
             && !modelReadAttempted.contains(sessionId) {
             modelReadAttempted.insert(sessionId)
             let cwd = sessions[sessionId]?.cwd
@@ -493,7 +497,7 @@ final class AppState {
     }
 
     func handlePermissionRequest(_ event: HookEvent, continuation: CheckedContinuation<Data, Never>) {
-        let sessionId = event.sessionId ?? "default"
+        let sessionId = event.routingSessionId
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
         }
@@ -509,7 +513,7 @@ final class AppState {
         sessions[sessionId]?.toolDescription = event.toolDescription
         sessions[sessionId]?.lastActivity = Date()
 
-        let request = PermissionRequest(event: event, continuation: continuation)
+        let request = PermissionRequest(sessionKey: sessionId, event: event, continuation: continuation)
         permissionQueue.append(request)
 
         // Show UI only if this is the first (or only) queued item
@@ -547,7 +551,7 @@ final class AppState {
             responseData = Data(response.utf8)
         }
         pending.continuation.resume(returning: responseData)
-        let sessionId = pending.event.sessionId ?? "default"
+        let sessionId = pending.sessionKey
         sessions[sessionId]?.status = .running
 
         showNextPending()
@@ -559,7 +563,7 @@ final class AppState {
         let pending = permissionQueue.removeFirst()
         let response = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#
         pending.continuation.resume(returning: Data(response.utf8))
-        let sessionId = pending.event.sessionId ?? "default"
+        let sessionId = pending.sessionKey
         sessions[sessionId]?.status = .idle
         sessions[sessionId]?.currentTool = nil
         sessions[sessionId]?.toolDescription = nil
@@ -573,7 +577,7 @@ final class AppState {
     }
 
     func handleQuestion(_ event: HookEvent, continuation: CheckedContinuation<Data, Never>) {
-        let sessionId = event.sessionId ?? "default"
+        let sessionId = event.routingSessionId
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
         }
@@ -589,7 +593,7 @@ final class AppState {
         sessions[sessionId]?.status = .waitingQuestion
         sessions[sessionId]?.lastActivity = Date()
 
-        let request = QuestionRequest(event: event, question: question, continuation: continuation)
+        let request = QuestionRequest(sessionKey: sessionId, event: event, question: question, continuation: continuation)
         questionQueue.append(request)
 
         if questionQueue.count == 1 {
@@ -603,7 +607,7 @@ final class AppState {
     }
 
     func handleAskUserQuestion(_ event: HookEvent, continuation: CheckedContinuation<Data, Never>) {
-        let sessionId = event.sessionId ?? "default"
+        let sessionId = event.routingSessionId
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
         }
@@ -639,7 +643,7 @@ final class AppState {
         sessions[sessionId]?.status = .waitingQuestion
         sessions[sessionId]?.lastActivity = Date()
 
-        let request = QuestionRequest(event: event, question: payload, continuation: continuation, isFromPermission: true)
+        let request = QuestionRequest(sessionKey: sessionId, event: event, question: payload, continuation: continuation, isFromPermission: true)
         questionQueue.append(request)
 
         if questionQueue.count == 1 {
@@ -680,7 +684,7 @@ final class AppState {
             responseData = (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8)
         }
         pending.continuation.resume(returning: responseData)
-        let sessionId = pending.event.sessionId ?? "default"
+        let sessionId = pending.sessionKey
         sessions[sessionId]?.status = .processing
 
         showNextPending()
@@ -697,7 +701,7 @@ final class AppState {
             responseData = Data(#"{"hookSpecificOutput":{"hookEventName":"Notification"}}"#.utf8)
         }
         pending.continuation.resume(returning: responseData)
-        let sessionId = pending.event.sessionId ?? "default"
+        let sessionId = pending.sessionKey
         sessions[sessionId]?.status = .processing
 
         showNextPending()
@@ -708,7 +712,7 @@ final class AppState {
     private func drainPermissions(forSession sessionId: String) {
         let denyResponse = Data(#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#.utf8)
         permissionQueue.removeAll { item in
-            guard (item.event.sessionId ?? "default") == sessionId else { return false }
+            guard item.sessionKey == sessionId else { return false }
             item.continuation.resume(returning: denyResponse)
             return true
         }
@@ -716,8 +720,8 @@ final class AppState {
 
     /// Called when the bridge socket disconnects — the question/permission was answered externally (e.g. user replied in terminal)
     func handlePeerDisconnect(sessionId: String) {
-        let hadPending = questionQueue.contains(where: { ($0.event.sessionId ?? "default") == sessionId })
-            || permissionQueue.contains(where: { ($0.event.sessionId ?? "default") == sessionId })
+        let hadPending = questionQueue.contains(where: { $0.sessionKey == sessionId })
+            || permissionQueue.contains(where: { $0.sessionKey == sessionId })
         guard hadPending else { return }
 
         drainQuestions(forSession: sessionId)
@@ -735,7 +739,7 @@ final class AppState {
     /// Drain all queued questions for a specific session, resuming their continuations with empty
     private func drainQuestions(forSession sessionId: String) {
         questionQueue.removeAll { item in
-            guard (item.event.sessionId ?? "default") == sessionId else { return false }
+            guard item.sessionKey == sessionId else { return false }
             item.continuation.resume(returning: Data("{}".utf8))
             return true
         }
@@ -744,11 +748,11 @@ final class AppState {
     /// After dequeuing, show next pending item or collapse
     private func showNextPending() {
         if let next = permissionQueue.first {
-            let sid = next.event.sessionId ?? "default"
+            let sid = next.sessionKey
             activeSessionId = sid
             surface = .approvalCard(sessionId: sid)
         } else if let next = questionQueue.first {
-            let sid = next.event.sessionId ?? "default"
+            let sid = next.sessionKey
             activeSessionId = sid
             surface = .questionCard(sessionId: sid)
         } else if case .approvalCard = surface {
@@ -833,12 +837,17 @@ final class AppState {
         let persisted = SessionPersistence.load()
         let cutoff = Date().addingTimeInterval(-30 * 60) // 30 minutes
         for p in persisted where p.lastActivity > cutoff {
-            guard sessions[p.sessionId] == nil else { continue }
+            let originId = p.originId ?? SessionKey.localOriginId
+            let persistedKey = SessionKey(originId: originId, sessionId: p.sessionId).rawValue
+            guard sessions[persistedKey] == nil else { continue }
             guard let source = SessionSnapshot.normalizedSupportedSource(p.source) else { continue }
             var snapshot = SessionSnapshot(startTime: p.startTime)
             snapshot.cwd = p.cwd
             snapshot.source = source
             snapshot.model = p.model
+            snapshot.originId = originId
+            snapshot.originDisplayName = p.originDisplayName
+            snapshot.remoteHostAlias = p.remoteHostAlias
             snapshot.sessionTitle = p.sessionTitle
             snapshot.sessionTitleSource = p.sessionTitleSource
             snapshot.providerSessionId = p.providerSessionId
@@ -862,15 +871,16 @@ final class AppState {
             if let pid = p.cliPid, pid > 0 {
                 snapshot.cliPid = pid
             }
-            sessions[p.sessionId] = snapshot
-            refreshProviderTitle(for: p.sessionId)
+            sessions[persistedKey] = snapshot
+            refreshProviderTitle(for: persistedKey)
             // Attach process monitor for exit detection, but keep status idle —
             // actual status will be updated when the next hook event arrives.
-            if let pid = snapshot.cliPid, pid > 0, kill(pid, 0) == 0 {
-                monitorProcess(sessionId: p.sessionId, pid: pid)
+            if !snapshot.isRemote, let pid = snapshot.cliPid, pid > 0, kill(pid, 0) == 0 {
+                monitorProcess(sessionId: persistedKey, pid: pid)
             } else {
+                guard !snapshot.isRemote else { continue }
                 // Async fallback: scan for Claude processes by CWD (monitor only)
-                let sid = p.sessionId
+                let sid = persistedKey
                 Task.detached {
                     let pid = Self.findPidForCwd(snapshot.cwd ?? "")
                     await MainActor.run { [weak self] in
@@ -962,7 +972,7 @@ final class AppState {
     private func integrateDiscovered(_ discovered: [DiscoveredSession]) {
         var didAdd = false
         for info in discovered {
-            let sessionKey = info.sessionId
+            let sessionKey = SessionKey(originId: SessionKey.localOriginId, sessionId: info.sessionId).rawValue
             // Session already known — try to attach PID monitor if missing
             if sessions[sessionKey] != nil {
                 if processMonitors[sessionKey] == nil, let pid = info.pid {
@@ -981,6 +991,7 @@ final class AppState {
             // sessions in the same repo aren't incorrectly merged.
             let duplicateKey = sessions.first(where: { (_, existing) in
                 guard existing.source == info.source,
+                      !existing.isRemote,
                       existing.cwd != nil, existing.cwd == info.cwd else { return false }
                 // If we have PIDs for both, they must match
                 if let discoveredPid = info.pid, let existingPid = existing.cliPid,
@@ -1003,6 +1014,7 @@ final class AppState {
             session.ttyPath = info.tty
             session.recentMessages = info.recentMessages
             session.source = info.source
+            session.originId = SessionKey.localOriginId
             session.providerSessionId = SessionTitleStore.supports(provider: info.source) ? info.sessionId : nil
             if let last = info.recentMessages.last(where: { $0.isUser }) {
                 session.lastUserPrompt = last.text

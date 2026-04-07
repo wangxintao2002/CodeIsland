@@ -9,7 +9,8 @@ private let log = Logger(subsystem: "com.codeisland", category: "HookServer")
 class HookServer {
     private let appState: AppState
     nonisolated static var socketPath: String { SocketPath.path }
-    private var listener: NWListener?
+    private var unixListener: NWListener?
+    private var tcpListener: NWListener?
 
     init(appState: AppState) {
         self.appState = appState
@@ -19,52 +20,89 @@ class HookServer {
         // Clean up stale socket
         unlink(HookServer.socketPath)
 
-        let parameters = NWParameters()
-        parameters.defaultProtocolStack.transportProtocol = NWProtocolTCP.Options()
-        parameters.requiredLocalEndpoint = NWEndpoint.unix(path: HookServer.socketPath)
+        let unixParams = NWParameters()
+        unixParams.defaultProtocolStack.transportProtocol = NWProtocolTCP.Options()
+        unixParams.requiredLocalEndpoint = NWEndpoint.unix(path: HookServer.socketPath)
 
         do {
-            listener = try NWListener(using: parameters)
+            unixListener = try NWListener(using: unixParams)
         } catch {
             log.error("Failed to create NWListener: \(error.localizedDescription)")
             return
         }
 
-        listener?.newConnectionHandler = { [weak self] connection in
+        unixListener?.newConnectionHandler = { [weak self] connection in
             Task { @MainActor in
-                self?.handleConnection(connection)
+                self?.handleConnection(connection, defaultOrigin: .local)
             }
         }
 
-        listener?.stateUpdateHandler = { state in
+        unixListener?.stateUpdateHandler = { state in
             switch state {
             case .ready:
-                log.info("HookServer listening on \(HookServer.socketPath)")
+                log.info("HookServer listening on unix \(HookServer.socketPath)")
             case .failed(let error):
-                log.error("HookServer listener failed: \(error.localizedDescription)")
+                log.error("HookServer unix listener failed: \(error.localizedDescription)")
             default:
                 break
             }
         }
 
-        listener?.start(queue: .main)
+        unixListener?.start(queue: .main)
+
+        startTCPListener()
     }
 
     func stop() {
-        listener?.cancel()
-        listener = nil
+        unixListener?.cancel()
+        tcpListener?.cancel()
+        unixListener = nil
+        tcpListener = nil
         unlink(HookServer.socketPath)
     }
 
-    private func handleConnection(_ connection: NWConnection) {
+    private func startTCPListener() {
+        let localPort = SettingsManager.shared.remoteLocalPort
+        let params = NWParameters.tcp
+        params.requiredLocalEndpoint = .hostPort(
+            host: "127.0.0.1",
+            port: NWEndpoint.Port(integerLiteral: NWEndpoint.Port.IntegerLiteralType(localPort))
+        )
+
+        do {
+            tcpListener = try NWListener(using: params)
+        } catch {
+            log.error("Failed to create TCP listener: \(error.localizedDescription)")
+            return
+        }
+
+        tcpListener?.newConnectionHandler = { [weak self] connection in
+            Task { @MainActor in
+                self?.handleConnection(connection, defaultOrigin: .remote(profileId: nil, displayName: nil))
+            }
+        }
+        tcpListener?.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                log.info("HookServer listening on tcp 127.0.0.1:\(localPort)")
+            case .failed(let error):
+                log.error("HookServer TCP listener failed: \(error.localizedDescription)")
+            default:
+                break
+            }
+        }
+        tcpListener?.start(queue: .main)
+    }
+
+    private func handleConnection(_ connection: NWConnection, defaultOrigin: ConnectionOrigin) {
         connection.start(queue: .main)
-        receiveAll(connection: connection, accumulated: Data())
+        receiveAll(connection: connection, accumulated: Data(), defaultOrigin: defaultOrigin)
     }
 
     private static let maxPayloadSize = 1_048_576  // 1MB safety limit
 
     /// Recursively receive all data until EOF, then process
-    private func receiveAll(connection: NWConnection, accumulated: Data) {
+    private func receiveAll(connection: NWConnection, accumulated: Data, defaultOrigin: ConnectionOrigin) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, isComplete, error in
             Task { @MainActor in
                 guard let self = self else { return }
@@ -86,9 +124,9 @@ class HookServer {
                 }
 
                 if isComplete || error != nil {
-                    self.processRequest(data: data, connection: connection)
+                    self.processRequest(data: data, connection: connection, defaultOrigin: defaultOrigin)
                 } else {
-                    self.receiveAll(connection: connection, accumulated: data)
+                    self.receiveAll(connection: connection, accumulated: data, defaultOrigin: defaultOrigin)
                 }
             }
         }
@@ -101,8 +139,12 @@ class HookServer {
         "EnterPlanMode", "ExitPlanMode",
     ]
 
-    private func processRequest(data: Data, connection: NWConnection) {
-        guard let event = HookEvent(from: data) else {
+    private func processRequest(data: Data, connection: NWConnection, defaultOrigin: ConnectionOrigin) {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            sendResponse(connection: connection, data: Data("{\"error\":\"parse_failed\"}".utf8))
+            return
+        }
+        guard let event = HookEvent(json: injectConnectionOrigin(into: json, defaultOrigin: defaultOrigin)) else {
             sendResponse(connection: connection, data: Data("{\"error\":\"parse_failed\"}".utf8))
             return
         }
@@ -114,7 +156,7 @@ class HookServer {
         }
 
         if event.eventName == "PermissionRequest" {
-            let sessionId = event.sessionId ?? "default"
+            let sessionId = event.routingSessionId
 
             // Auto-approve safe internal tools without showing UI
             if let toolName = event.toolName, Self.autoApproveTools.contains(toolName) {
@@ -143,7 +185,7 @@ class HookServer {
             }
         } else if EventNormalizer.normalize(event.eventName) == "Notification",
                   QuestionPayload.from(event: event) != nil {
-            let questionSessionId = event.sessionId ?? "default"
+            let questionSessionId = event.routingSessionId
             monitorPeerDisconnect(connection: connection, sessionId: questionSessionId)
             Task {
                 let responseBody = await withCheckedContinuation { continuation in
@@ -164,7 +206,52 @@ class HookServer {
     private final class ConnectionContext {
         var responded: Bool = false
     }
+
     private var connectionContexts: [ObjectIdentifier: ConnectionContext] = [:]
+
+    private enum ConnectionOrigin {
+        case local
+        case remote(profileId: String?, displayName: String?)
+    }
+
+    private func injectConnectionOrigin(into json: [String: Any], defaultOrigin: ConnectionOrigin) -> [String: Any] {
+        var merged = json
+        if merged["_origin"] == nil {
+            switch defaultOrigin {
+            case .local:
+                merged["_origin"] = "local"
+            case .remote:
+                merged["_origin"] = "remote"
+            }
+        }
+
+        if merged["_origin_id"] == nil {
+            if let profile = merged["_remote_profile"] as? String, !profile.isEmpty {
+                merged["_origin_id"] = "remote:\(profile)"
+            } else {
+                switch defaultOrigin {
+                case .local:
+                    merged["_origin_id"] = SessionKey.localOriginId
+                case .remote(let profileId, _):
+                    if let profileId, !profileId.isEmpty {
+                        merged["_origin_id"] = "remote:\(profileId)"
+                    } else {
+                        merged["_origin_id"] = SessionKey.localOriginId
+                    }
+                }
+            }
+        }
+
+        if merged["_origin_display_name"] == nil {
+            if let alias = merged["_remote_host_alias"] as? String, !alias.isEmpty {
+                merged["_origin_display_name"] = alias
+            } else if case .remote(_, let displayName) = defaultOrigin, let displayName, !displayName.isEmpty {
+                merged["_origin_display_name"] = displayName
+            }
+        }
+
+        return merged
+    }
 
     /// Watch for bridge process disconnect — indicates the bridge process actually died
     /// (e.g. user Ctrl-C'd Claude Code), NOT a normal half-close.

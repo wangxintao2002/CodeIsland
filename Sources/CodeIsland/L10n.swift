@@ -38,6 +38,7 @@ final class L10n: ObservableObject {
         "appearance": "Appearance",
         "mascots": "Mascots",
         "sound": "Sound",
+        "remote": "Remote",
         "hooks": "Hooks",
         "about": "About",
 
@@ -215,6 +216,7 @@ final class L10n: ObservableObject {
         "appearance": "外观",
         "mascots": "角色",
         "sound": "声音",
+        "remote": "远程",
         "hooks": "Hooks",
         "about": "关于",
 

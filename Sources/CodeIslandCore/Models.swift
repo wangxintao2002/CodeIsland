@@ -17,8 +17,14 @@ public struct HookEvent {
     public let rawJSON: [String: Any]  // Full payload for event-specific fields
 
     public init?(from data: Data) {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let eventName = json["hook_event_name"] as? String else {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        self.init(json: json)
+    }
+
+    public init?(json: [String: Any]) {
+        guard let eventName = json["hook_event_name"] as? String else {
             return nil
         }
         self.eventName = eventName
@@ -42,6 +48,38 @@ public struct HookEvent {
         if let agentType = rawJSON["agent_type"] as? String { return agentType }
         if let prompt = rawJSON["prompt"] as? String { return String(prompt.prefix(40)) }
         return nil
+    }
+
+    public var originId: String {
+        if let origin = rawJSON["_origin_id"] as? String,
+           !origin.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return origin
+        }
+        if let profile = rawJSON["_remote_profile"] as? String,
+           !profile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "remote:\(profile)"
+        }
+        return SessionKey.localOriginId
+    }
+
+    public var originDisplayName: String? {
+        if let display = rawJSON["_origin_display_name"] as? String,
+           !display.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return display
+        }
+        if let alias = rawJSON["_remote_host_alias"] as? String,
+           !alias.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return alias
+        }
+        return nil
+    }
+
+    public var sessionKey: SessionKey {
+        SessionKey(originId: originId, sessionId: sessionId ?? "default")
+    }
+
+    public var routingSessionId: String {
+        sessionKey.rawValue
     }
 }
 

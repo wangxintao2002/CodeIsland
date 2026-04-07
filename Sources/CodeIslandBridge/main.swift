@@ -141,6 +141,56 @@ func connectSocket(_ path: String) -> Int32? {
     return sock
 }
 
+func connectTCP(host: String, port: UInt16) -> Int32? {
+    let sock = socket(AF_INET, SOCK_STREAM, 0)
+    guard sock >= 0 else { return nil }
+
+    var on: Int32 = 1
+    setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+
+    var addr = sockaddr_in()
+    addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    addr.sin_family = sa_family_t(AF_INET)
+    addr.sin_port = port.bigEndian
+    guard inet_pton(AF_INET, host, &addr.sin_addr) == 1 else {
+        close(sock)
+        return nil
+    }
+
+    let origFlags = fcntl(sock, F_GETFL)
+    _ = fcntl(sock, F_SETFL, origFlags | O_NONBLOCK)
+
+    let result = withUnsafePointer(to: &addr) { ptr in
+        ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            connect(sock, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
+    }
+
+    if result != 0 && errno != EINPROGRESS {
+        close(sock)
+        return nil
+    }
+
+    if result != 0 {
+        var pfd = pollfd(fd: sock, events: Int16(POLLOUT), revents: 0)
+        let ready = poll(&pfd, 1, 3000)
+        if ready <= 0 {
+            close(sock)
+            return nil
+        }
+        var sockErr: Int32 = 0
+        var errLen = socklen_t(MemoryLayout<Int32>.size)
+        getsockopt(sock, SOL_SOCKET, SO_ERROR, &sockErr, &errLen)
+        if sockErr != 0 {
+            close(sock)
+            return nil
+        }
+    }
+
+    _ = fcntl(sock, F_SETFL, origFlags)
+    return sock
+}
+
 func sendAll(_ sock: Int32, data: Data) {
     data.withUnsafeBytes { buf in
         guard let base = buf.baseAddress else { return }
@@ -177,6 +227,8 @@ func recvAll(_ sock: Int32) -> Data {
 let socketPath = SocketPath.path
 let env = ProcessInfo.processInfo.environment
 let args = CommandLine.arguments
+let remoteHost = env["CODEISLAND_HOST"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+let remotePort = env["CODEISLAND_PORT"].flatMap { UInt16($0) }
 
 // Parse --source flag (e.g. --source codex)
 var sourceTag: String? = nil
@@ -294,14 +346,34 @@ if let source = sourceTag {
     json["_source"] = source
 }
 
+if let remoteProfile = env["CODEISLAND_REMOTE_PROFILE"], !remoteProfile.isEmpty {
+    json["_remote_profile"] = remoteProfile
+    json["_origin"] = "remote"
+    json["_origin_id"] = "remote:\(remoteProfile)"
+}
+if let remoteAlias = env["CODEISLAND_REMOTE_HOST_ALIAS"], !remoteAlias.isEmpty {
+    json["_remote_host_alias"] = remoteAlias
+    json["_origin_display_name"] = remoteAlias
+}
+if json["_origin"] == nil {
+    json["_origin"] = "local"
+    json["_origin_id"] = SessionKey.localOriginId
+}
+
 // Parent PID — the CLI process that spawned this hook (works for any CLI)
 json["_ppid"] = getppid()
 
 // --- Serialize enriched JSON ---
 guard let enriched = try? JSONSerialization.data(withJSONObject: json) else { exit(1) }
 
-// --- Connect to CodeIsland socket ---
-guard let sock = connectSocket(socketPath) else {
+// --- Connect to target (TCP for remote mode, Unix socket for local mode) ---
+let sock: Int32?
+if let remoteHost, let remotePort {
+    sock = connectTCP(host: remoteHost, port: remotePort)
+} else {
+    sock = connectSocket(socketPath)
+}
+guard let sock else {
     debugLog("socket connect failed")
     exit(0)
 }
