@@ -30,6 +30,7 @@ It connects to **9 AI coding tools** via Unix socket IPC, displaying session sta
 - **Live status tracking** — See active sessions, tool calls, and AI responses in real time
 - **Permission management** — Approve/deny tool permissions directly from the panel
 - **Question answering** — Respond to agent questions without leaving your current app
+- **Remote SSH sessions** — Monitor Claude Code / Codex / OpenCode running on remote machines through SSH reverse forwarding
 - **Pixel-art mascots** — Each AI tool has its own animated character
 - **One-click jump** — Click a session to jump to its terminal tab or IDE window
 - **Smart suppress** — Tab-level terminal detection: only suppresses notifications when you're looking at the specific session tab, not just the terminal app
@@ -101,15 +102,70 @@ CodeIsland installs lightweight hooks into each AI tool's config. When the tool 
 
 For **OpenCode**, a JS plugin connects directly to the socket — no bridge binary needed.
 
+## Remote Sessions (SSH)
+
+CodeIsland can also show sessions running on a remote machine over SSH. The app listens on a local TCP port, and the remote host forwards its hook traffic back through an SSH reverse tunnel.
+
+### 1. Create a remote profile
+
+Open **Settings → Remote** and add a profile:
+
+- **Display Name** — label shown in the panel, for example `Prod`
+- **SSH Host Alias** — a host alias from your local `~/.ssh/config`, for example `prod-app`
+- **Remote Forward Port** — the loopback port exposed on the remote host, for example `39092`
+
+CodeIsland listens locally on `127.0.0.1:39091` by default.
+
+### 2. Start the reverse tunnel
+
+From your Mac, keep this SSH session running:
+
+```bash
+ssh -N prod-app -R 127.0.0.1:39092:127.0.0.1:39091
+```
+
+If your SSH alias already uses `ProxyJump`, bastions, custom ports, or keys, CodeIsland reuses that config automatically.
+
+### 3. Set the remote environment
+
+On the remote shell where you launch the AI CLI, export:
+
+```bash
+export CODEISLAND_HOST=127.0.0.1
+export CODEISLAND_PORT=39092
+export CODEISLAND_REMOTE_PROFILE=<profile-id>
+export CODEISLAND_REMOTE_HOST_ALIAS=prod-app
+```
+
+Use the exact `profile-id` shown in the **Remote Environment** snippet in Settings.
+
+### 4. Point the remote hooks at CodeIsland
+
+Your remote hook should call `codeisland-bridge --source <tool>`:
+
+- Claude Code: `codeisland-bridge --source claude`
+- Codex: `codeisland-bridge --source codex`
+
+### 5. Launch the remote CLI
+
+Run `claude code`, `codex`, or `opencode` on the remote machine from the same shell where the environment variables are set. The session will appear in the notch panel with a `REMOTE` badge, and approvals / answers are sent back over the same SSH tunnel.
+
+### Notes
+
+- Remote sessions are event-driven. If the remote CLI does not emit hook events, CodeIsland cannot infer status from transcripts or local process discovery.
+- The bundled `codeisland-bridge` helper inside `CodeIsland.app` is macOS-only. For Linux servers, use a compatible wrapper script on the remote side that forwards stdin JSON to `CODEISLAND_HOST:CODEISLAND_PORT`.
+- Clicking **Jump** on a remote session uses the configured SSH host alias instead of local terminal tab activation.
+
 ## Settings
 
-CodeIsland provides a 7-tab settings panel:
+CodeIsland provides an 8-tab settings panel:
 
 - **General** — Language, launch at login, display selection
 - **Behavior** — Auto-hide, smart suppress, session cleanup
 - **Appearance** — Panel height, font size, AI reply lines
 - **Mascots** — Preview all pixel-art characters and their animations
 - **Sound** — 8-bit sound effects for session events
+- **Remote** — Manage SSH profiles, tunnels, and remote environment snippets
 - **Hooks** — View CLI installation status, reinstall or uninstall hooks
 - **About** — Version info and links
 
