@@ -24,14 +24,14 @@ public struct HookEvent {
     }
 
     public init?(json: [String: Any]) {
-        guard let eventName = json["hook_event_name"] as? String else {
+        guard let eventName = HookEvent.readEventName(from: json) else {
             return nil
         }
         self.eventName = eventName
-        self.sessionId = json["session_id"] as? String
-        self.toolName = json["tool_name"] as? String
-        self.toolInput = json["tool_input"] as? [String: Any]
-        self.agentId = json["agent_id"] as? String
+        self.sessionId = HookEvent.readString(from: json, keys: ["session_id", "sessionId", "conversation_id", "conversationId"])
+        self.toolName = HookEvent.readString(from: json, keys: ["tool_name", "toolName"])
+        self.toolInput = HookEvent.readObject(from: json, keys: ["tool_input", "toolInput", "toolArgs"])
+        self.agentId = HookEvent.readString(from: json, keys: ["agent_id", "agentId"])
         self.rawJSON = json
     }
 
@@ -44,9 +44,9 @@ public struct HookEvent {
             if let prompt = input["prompt"] as? String { return String(prompt.prefix(40)) }
         }
         // Fall back to top-level fields
-        if let msg = rawJSON["message"] as? String { return msg }
-        if let agentType = rawJSON["agent_type"] as? String { return agentType }
-        if let prompt = rawJSON["prompt"] as? String { return String(prompt.prefix(40)) }
+        if let msg = HookEvent.readString(from: rawJSON, keys: ["message"]) { return msg }
+        if let agentType = HookEvent.readString(from: rawJSON, keys: ["agent_type", "agentType"]) { return agentType }
+        if let prompt = HookEvent.readString(from: rawJSON, keys: ["prompt", "user_prompt", "userPrompt"]) { return String(prompt.prefix(40)) }
         return nil
     }
 
@@ -80,6 +80,36 @@ public struct HookEvent {
 
     public var routingSessionId: String {
         sessionKey.rawValue
+    }
+
+    private static func readEventName(from json: [String: Any]) -> String? {
+        readString(from: json, keys: ["hook_event_name", "hookEventName", "event", "eventName"])
+    }
+
+    private static func readString(from json: [String: Any], keys: [String]) -> String? {
+        for key in keys {
+            if let value = json[key] as? String {
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    return trimmed
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func readObject(from json: [String: Any], keys: [String]) -> [String: Any]? {
+        for key in keys {
+            if let object = json[key] as? [String: Any] {
+                return object
+            }
+            if let text = json[key] as? String,
+               let data = text.data(using: .utf8),
+               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                return object
+            }
+        }
+        return nil
     }
 }
 

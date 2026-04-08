@@ -420,13 +420,7 @@ public func reduceEvent(
         sessions[sessionId]?.status = .processing
         sessions[sessionId]?.currentTool = nil
         sessions[sessionId]?.toolDescription = nil
-        // Try multiple possible field names for user prompt
-        let prompt = event.rawJSON["prompt"] as? String
-            ?? event.rawJSON["user_prompt"] as? String
-            ?? event.rawJSON["message"] as? String
-            ?? event.rawJSON["input"] as? String
-            ?? event.rawJSON["content"] as? String
-        if let prompt {
+        if let prompt = extractUserPrompt(from: event) {
             sessions[sessionId]?.lastUserPrompt = prompt
             if sessions[sessionId]?.recentMessages.last?.isUser == true {
                 sessions[sessionId]?.recentMessages.removeLast()
@@ -504,7 +498,7 @@ public func reduceEvent(
         }
         // Try to capture user prompt from Stop event if not already set
         if sessions[sessionId]?.lastUserPrompt == nil {
-            if let prompt = event.rawJSON["last_user_message"] as? String {
+            if let prompt = extractUserPrompt(from: event) {
                 sessions[sessionId]?.lastUserPrompt = prompt
                 let insertAt = max(0, (sessions[sessionId]?.recentMessages.count ?? 1) - 1)
                 sessions[sessionId]?.insertRecentMessage(ChatMessage(isUser: true, text: prompt), at: insertAt)
@@ -537,6 +531,15 @@ public func reduceEvent(
         if let mode = event.rawJSON["permission_mode"] as? String { sessions[sessionId]?.permissionMode = mode }
         if let roots = event.rawJSON["workspace_roots"] as? [String], let first = roots.first, !first.isEmpty {
             sessions[sessionId]?.cwd = first
+        }
+        if let prompt = extractUserPrompt(from: event) {
+            sessions[sessionId]?.lastUserPrompt = prompt
+            sessions[sessionId]?.addRecentMessage(ChatMessage(isUser: true, text: prompt))
+        }
+        // Codex often runs with sparse hook coverage on some installs. If SessionStart is
+        // the earliest reliable signal, keep the island in a working state until Stop lands.
+        if sessions[sessionId]?.source == "codex" {
+            sessions[sessionId]?.status = .processing
         }
         effects.append(.tryMonitorSession(sessionId: sessionId))
     case "SessionEnd":
@@ -671,6 +674,83 @@ public func extractMetadata(into sessions: inout [String: SessionSnapshot], sess
     if let source = SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String) {
         sessions[sessionId]?.source = source
     }
+}
+
+private func extractUserPrompt(from event: HookEvent) -> String? {
+    if let prompt = nonEmptyPrompt([
+        event.rawJSON["prompt"],
+        event.rawJSON["user_prompt"],
+        event.rawJSON["userPrompt"],
+        event.rawJSON["last_user_message"],
+        event.rawJSON["message"],
+        event.rawJSON["input"],
+        event.rawJSON["content"],
+    ]) {
+        return prompt
+    }
+
+    if let input = event.toolInput {
+        if let prompt = nonEmptyPrompt([
+            input["prompt"],
+            input["user_prompt"],
+            input["userPrompt"],
+            input["message"],
+            input["input"],
+            input["content"],
+            input["text"],
+        ]) {
+            return prompt
+        }
+    }
+
+    if let prompt = extractPromptFromMessages(event.rawJSON["messages"]) {
+        return prompt
+    }
+    if let prompt = extractPromptFromMessages(event.rawJSON["input_messages"]) {
+        return prompt
+    }
+
+    return nil
+}
+
+private func extractPromptFromMessages(_ value: Any?) -> String? {
+    guard let messages = value as? [[String: Any]] else { return nil }
+
+    for message in messages.reversed() {
+        let role = (message["role"] as? String)?.lowercased()
+        guard role == "user" else { continue }
+
+        if let prompt = nonEmptyPrompt([
+            message["text"],
+            message["prompt"],
+            message["message"],
+            message["content"],
+        ]) {
+            return prompt
+        }
+
+        if let parts = message["content"] as? [[String: Any]] {
+            for part in parts {
+                if let text = nonEmptyPrompt([part["text"], part["content"]]) {
+                    return text
+                }
+            }
+        }
+    }
+
+    return nil
+}
+
+private func nonEmptyPrompt(_ candidates: [Any?]) -> String? {
+    for candidate in candidates {
+        if let str = candidate as? String {
+            let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+    }
+    return nil
 }
 
 /// Handle subagent events. Returns true if the event was consumed.
